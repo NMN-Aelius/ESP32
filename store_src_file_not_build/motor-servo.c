@@ -25,6 +25,14 @@ static inline uint32_t example_angle_to_compare(int angle)
 {
     return (angle - SERVO_MIN_DEGREE) * (SERVO_MAX_PULSEWIDTH_US - SERVO_MIN_PULSEWIDTH_US)\
             / (SERVO_MAX_DEGREE - SERVO_MIN_DEGREE) + SERVO_MIN_PULSEWIDTH_US;
+
+    /* 
+    Imaging the Oxy dimention with
+    - Ox: is the Delta change of Angle
+    - Oy: is the Phi change of Pulse width
+    Linear interpolation (lerp), We can compute the amount of change Angle (degree)
+    with respectively PulseWidth in PWM
+    */
 }
 
 void app_main(void)

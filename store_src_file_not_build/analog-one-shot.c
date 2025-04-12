@@ -52,7 +52,8 @@ static int voltage[2][10];
 /*
     function
 */
-static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);
+static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel,\
+     adc_atten_t atten, adc_cali_handle_t *out_handle);
 static void example_adc_calibration_deinit(adc_cali_handle_t handle);
 
 /*
@@ -198,6 +199,14 @@ hoặc nhiệt độ chính xác hơn.
         adc_cali_line_fitting_config_t cali_config = {
             .unit_id = unit,
             .atten = atten,
+        /*Phạm vi của ADC thì có giới hạn, nhưng điện áp
+        đầu vào thì không. Attenuation được dùng để scale 
+        điện áp về mức ADC có thể đọc được
+        => làm tăng phạm vi đo của điện áp
+        
+        CT Voltage: Attenuation (dB) = 20 * log10(Vin / Vout)
+        CT Power: Attenuation (dB) = 10 * log10(Pin / Pout)
+        Power ~ Voltage^2*/
             .bitwidth = ADC_BITWIDTH_DEFAULT, //0
         };
         ret = adc_cali_create_scheme_line_fitting(&cali_config, &handle);
