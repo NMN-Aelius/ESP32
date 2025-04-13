@@ -17,31 +17,98 @@
 
 static const char *TAG = "demo-adc-motor";
 
-/* MOTOR STEP DEFINE VALUE */
+/* ================ START DEFINE ================*/
+//MOTOR Parameter
 #define MIN_PULSEWIDTH_US 500   // Minimum pulse width in microsecond = 0.5ms
 #define MAX_PULSEWIDTH_US 2120  // Maximum pulse width in microsecond = 2.5ms
-//datasheet of servo
-#define MIN_ANGLE_DEGREE  0     // Minimum angle
-#define MAX_ANGLE_DEGREE  180   // Maximum angle
 
-#define MOTOR_GPIO_19             19
+#define MIN_ANGLE_DEGREE    0   // Minimum angle
+#define MIN_RAW_ADC_DEGREE  0   // Minimum rawADC
+#define MAX_ANGLE_DEGREE    180 // Maximum angle
+#define MAX_RAW_ADC_DEGREE  4095// Maximum rawADC
+
 #define MOTOR_GPIO_18             18
 #define SERVO_TIMEBASE_RESOLUTION_HZ 1000000  // 1MHz, 1us per tick
 #define SERVO_TIMEBASE_PERIOD        3000    // 20000 ticks, 20ms
 
-/* ADC DEFINE VALUE */
+//ADC Parameter
 #define ADC1_PIN34 ADC_CHANNEL_6 //PIN 34 DEVKIT-DOIT
 #define ADC1_PIN35 ADC_CHANNEL_7 //PIN 35 DEVKIT-DOIT
+#define ATTEN_MODE ADC_ATTEN_DB_12 // Max range
+#define MAX_RAW_VALUE 4095
 
-// static int adc_raw[1][10]; // 1 is x in ADCx, 10 is number of channel can have in ADC
-// static int voltage[1][10]; // respectively with adc_raw.
+//PID Parameter
+#define P_PROPORTIAL 70
+#define P_INTERGAL 3
+#define P_DERIVATIVE 2
+
+#define SAMPLE_TIME 0.001 //1ms
+
+//Variable
+static int sg_raw_adc_value = 0;
+static int sg_raw_adc_prev = 0;
+// static int sg_raw_conv = 0; //=> for input is angle user input
+
+//PID parameter
+int inte = 0;
+int deri = 0;
+
+int err_prev = 0;
+
+/* ================ START FUNCTION ================*/
+/* FUNCTION PID CONTROL */
+void pid_tune_raw_value(int *val_cur, int *val_prev, int *_err_prev)
+{
+    int err = *val_cur - *val_prev;
+    *val_prev = *val_cur;
+
+    inte += err * SAMPLE_TIME;
+    deri = (err - *_err_prev)/SAMPLE_TIME;
+
+    *_err_prev = err;
+    *val_cur += P_PROPORTIAL* err + P_INTERGAL* inte + P_DERIVATIVE * deri;
+}
 
 /* FUNCTION MOTOR SERVO */
 static inline uint32_t scale_angle_to_ticks(int angle)
 {
     return ((angle-MIN_ANGLE_DEGREE) * (MAX_PULSEWIDTH_US-MIN_PULSEWIDTH_US) / (MAX_ANGLE_DEGREE-MIN_ANGLE_DEGREE)) + MIN_PULSEWIDTH_US;
 }
-/* ================ END FUNCTION ================*/
+static inline uint32_t scale_rawADC_to_ticks(int rawADC)
+{
+    return ((rawADC-MIN_RAW_ADC_DEGREE) * (MAX_PULSEWIDTH_US-MIN_PULSEWIDTH_US) / (MAX_RAW_ADC_DEGREE-MIN_RAW_ADC_DEGREE)) + MIN_PULSEWIDTH_US;
+}
+/* FUNCTION ADC */
+static bool init_calib_oneshot_adc(adc_oneshot_chan_cfg_t *i_config, adc_unit_t i_unit, adc_channel_t i_channel, adc_cali_handle_t *rtn_handle)
+{
+    ESP_LOGI(TAG, "ESP jump to calib function");
+    adc_cali_handle_t handle = NULL;
+    esp_err_t ret_status = ESP_FAIL;
+    int check = 0;
+
+    if(!check)
+    {
+        adc_cali_line_fitting_config_t config = {
+            .unit_id = i_unit,
+            .atten = i_config->atten,
+            .bitwidth = i_config->bitwidth
+        };
+        ret_status = adc_cali_create_scheme_line_fitting(&config, &handle);
+
+        if(ret_status == ESP_OK) check = 0;
+        else check = -1;
+    }
+
+    *rtn_handle = handle;
+    return check;
+}
+static bool deinit_calib_oneshot_adc(adc_cali_handle_t init_handle)
+{
+    if(adc_cali_delete_scheme_line_fitting(init_handle) != ESP_OK) return -1;
+    return 0;
+}
+
+//PID FUNCTION
 
 void app_main(void)
 {
@@ -60,15 +127,13 @@ void app_main(void)
     mcpwm_oper_handle_t oper_handle =  NULL;
     mcpwm_operator_config_t oper_config = {
         .group_id = 0,
-        // .flags no flag is need
     };
     mcpwm_new_operator(&oper_config, &oper_handle);
     mcpwm_operator_connect_timer(oper_handle, timer_handle);
 
     mcpwm_cmpr_handle_t cmp_handle =NULL;
     mcpwm_comparator_config_t compare_cfg = {
-        .flags.update_cmp_on_tez = 1,
-        //only take value 1 or 0, because it is a bit (when timer set to 0 it will be trigger)
+        .flags.update_cmp_on_tez = 1
     };
     mcpwm_new_comparator(oper_handle, &compare_cfg, &cmp_handle);
 
@@ -80,9 +145,6 @@ void app_main(void)
 
     //Set init value for the first time of servo motor
     mcpwm_comparator_set_compare_value(cmp_handle, scale_angle_to_ticks(0));
-
-    //Generator là bộ tạo xung pwm, dựa trên event được gửi từ comparator nó sẽ có action tương ứng
-    //Sau đây là việc cấu hình các actions này
 
     ESP_LOGI(TAG, "Set actions for generator to deal with pwm pulse!!");
     mcpwm_generator_set_action_on_timer_event(gen_handle,\
@@ -99,32 +161,46 @@ void app_main(void)
 
     /*=================ADC CONTROL=================*/
 
-    int angle = 0;
-    int step = 1;
-    bool flag = 0;
+    adc_oneshot_unit_handle_t adc_handle_1 = NULL;
+    adc_oneshot_unit_init_cfg_t init_adc_1 = {
+        .unit_id = ADC_UNIT_1
+    };
 
-    while (1) {
-        
+    adc_oneshot_chan_cfg_t channel_cfg = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT, //12bits
+        .atten = ATTEN_MODE
+    };
+
+    adc_oneshot_new_unit(&init_adc_1, &adc_handle_1);
+    // Set pin using channel config
+    adc_oneshot_config_channel(adc_handle_1, ADC_CHANNEL_6, &channel_cfg); //pin 34
+
+    adc_cali_handle_t handle_channel_6;
+    bool channel_6 = init_calib_oneshot_adc(&channel_cfg, init_adc_1.unit_id, ADC_CHANNEL_6, &handle_channel_6);
+
+    while (1)
+    {
+
+        if(!channel_6)
+        {
+            adc_oneshot_read(adc_handle_1, ADC_CHANNEL_6, &sg_raw_adc_value);
+            ESP_LOGI(TAG, "Raw of channel Channel 6: %d", sg_raw_adc_value);
+        }
+
+        pid_tune_raw_value(&sg_raw_adc_value, &sg_raw_adc_prev, &err_prev);
+        ESP_LOGI(TAG, "Raw value is: %d", sg_raw_adc_value);
+        mcpwm_comparator_set_compare_value(cmp_handle,  scale_rawADC_to_ticks(sg_raw_adc_value));
+
+/***
+        angle = (sg_raw_adc_value * MAX_ANGLE_DEGREE) / MAX_RAW_VALUE;
+
         ESP_LOGI(TAG, "Angle of rotation: %d", angle);
         int check = scale_angle_to_ticks(angle);
         ESP_LOGI(TAG, "TICKs %d", check);
         mcpwm_comparator_set_compare_value(cmp_handle, scale_angle_to_ticks(angle));
-
-        if(flag)
-        {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            ESP_LOGI(TAG, "Timer go go!!");
-            mcpwm_timer_start_stop(timer_handle, MCPWM_TIMER_START_NO_STOP);
-            flag = 0;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(500)); //take time for motor rotation.
-        if ((angle + step) > 180 ) {
-            // step = 0; //stop
-            angle = 0;
-            mcpwm_timer_start_stop(timer_handle, MCPWM_TIMER_STOP_EMPTY);
-            flag = 1;
-        }
-        angle += step;
+***/
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
+
+    deinit_calib_oneshot_adc(handle_channel_6);
 }
